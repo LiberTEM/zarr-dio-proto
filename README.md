@@ -15,7 +15,7 @@ than benchmarking.
 
 ## Example output
 
-These numbers were obtained on: AMD EPYC 7F72, 2x KCM61VUL3T20 NVMe SSD (RAID 0).
+These numbers were obtained on: AMD EPYC 7F72, 2x [KCM61VUL3T20](https://europe.kioxia.com/en-europe/business/ssd/enterprise-ssd/cm6-v.html) NVMe SSD (RAID 0).
 
 Running the benchmark gives output like this:
 
