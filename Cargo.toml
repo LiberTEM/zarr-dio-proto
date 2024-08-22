@@ -1,0 +1,13 @@
+[package]
+name = "zarr_dio_example"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+clap = { version = "4.5.16", features = ["derive"] }
+ndarray = "0.16.1"
+nix = "0.29.0"
+page_size = "0.6.0"
+rand = "0.8.5"
+zarrs = { version = "0.16.3" }
+zerocopy = "0.7.35"
