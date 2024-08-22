@@ -12,7 +12,7 @@ use std::{
 };
 
 use clap::Parser;
-use ndarray::{Array3, ArrayView3, Axis, Slice};
+use ndarray::{ArrayView3, Axis, Slice};
 use rand::RngCore;
 use zarrs::{
     array::{Array, ArrayBuilder, FillValue}, array_subset::ArraySubset, storage::{data_key, store::FilesystemStore, ReadableWritableListableStorage, StoreKey}
@@ -67,7 +67,8 @@ const SIDE: u64 = 512;
 const SHAPE: [u64; 3] = [65536, SIDE, SIDE];
 
 /// Write the array using the built-in `FilesystemStore` of `zarrs`
-fn write_buffered_io(save_path: &Path, array_path: &str, input_data: &ArrayView3<u16>) {
+fn write_buffered_io(save_path: &Path, array_path: &str, input_data: &PageAlinedBuffer) {
+    let input_data = ArrayView3::from_shape([65536, SIDE as usize, SIDE as usize], u16::slice_from(input_data).unwrap()).unwrap();
     let store: ReadableWritableListableStorage = Arc::new(FilesystemStore::new(save_path).unwrap());
     let chunk_grid = vec![CHUNK as u64, SIDE, SIDE];
 
@@ -103,7 +104,8 @@ fn key_to_fspath(save_path: &Path, key: &StoreKey) -> PathBuf {
 }
 
 /// Write the array using a fast-path O_DIRECT writer
-fn write_direct_io(save_path: &Path, array_path: &str, input_data: &ArrayView3<u16>) {
+fn write_direct_io(save_path: &Path, array_path: &str, input_data: &PageAlinedBuffer) {
+    let input_data = ArrayView3::from_shape([65536, SIDE as usize, SIDE as usize], u16::slice_from(input_data).unwrap()).unwrap();
     let store: ReadableWritableListableStorage = Arc::new(FilesystemStore::new(save_path).unwrap());
     let chunk_grid = vec![CHUNK as u64, SIDE, SIDE];
 
@@ -120,9 +122,8 @@ fn write_direct_io(save_path: &Path, array_path: &str, input_data: &ArrayView3<u
 
     let t0 = Instant::now();
 
-    let mut buf = PageAlinedBuffer::new((SIDE * SIDE * 2) as usize * CHUNK);
-
     for i in 0..(65536 / CHUNK as u64) {
+        // NOTE: the slicing here happens to align to the page size
         let inp_slice = input_data.slice_axis(Axis(0), Slice::from(i as usize..i as usize + CHUNK));
 
         let chunk_indices = [i, 0, 0];
@@ -153,12 +154,8 @@ fn write_direct_io(save_path: &Path, array_path: &str, input_data: &ArrayView3<u
         assert!(aligned_cutoff >= cutoff as usize);
         assert!(aligned_cutoff % align as usize == 0);
 
-        // Copy into aligned buffer:
-        let buf_u16 = u16::mut_slice_from(&mut buf).unwrap();
-        buf_u16[0..inp_slice.len()].copy_from_slice(data);
-
         // Write
-        file.write_all(&buf[0..aligned_cutoff]).unwrap();
+        file.write_all(data.as_bytes()).unwrap();
 
         // We may have written more because of page-size alignment; truncate.
         file.set_len(cutoff).unwrap();
@@ -184,16 +181,15 @@ struct Args {
     what: RunWhat,
 }
 
-fn make_data() -> Array3<u16> {
-    let mut data = vec![0u16; 65536 * (SIDE * SIDE) as usize];
-    let data_bytes = data.as_bytes_mut();
+fn make_data() -> PageAlinedBuffer {
+    let mut buf = PageAlinedBuffer::new(2 * 65536 * (SIDE * SIDE) as usize * size_of::<u16>());
 
     eprintln!("filling data with randomness...");
     let t0 = Instant::now();
-    rand::thread_rng().fill_bytes(data_bytes);
+    rand::thread_rng().fill_bytes(&mut buf);
     eprintln!("... done in {:?}.", t0.elapsed());
 
-    Array3::from_shape_vec([65536, SIDE as usize, SIDE as usize], data).unwrap()
+    buf
 }
 
 fn main() {
@@ -201,16 +197,16 @@ fn main() {
     match args.what {
         RunWhat::Both => {
             let input_arr = make_data();
-            write_buffered_io(&args.save_prefix, "/buffered", &input_arr.view());
-            write_direct_io(&args.save_prefix, "/direct", &input_arr.view());
+            write_buffered_io(&args.save_prefix, "/buffered", &input_arr);
+            write_direct_io(&args.save_prefix, "/direct", &input_arr);
         }
         RunWhat::Direct => {
             let input_arr = make_data();
-            write_direct_io(&args.save_prefix, "/direct", &input_arr.view());
+            write_direct_io(&args.save_prefix, "/direct", &input_arr);
         }
         RunWhat::Buffered => {
             let input_arr = make_data();
-            write_buffered_io(&args.save_prefix, "/buffered", &input_arr.view());
+            write_buffered_io(&args.save_prefix, "/buffered", &input_arr);
         }
         RunWhat::Compare => {
             let store: ReadableWritableListableStorage = Arc::new(FilesystemStore::new(&args.save_prefix).unwrap());
