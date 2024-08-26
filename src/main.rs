@@ -15,9 +15,11 @@ use clap::Parser;
 use ndarray::{Array3, ArrayView3, Axis, Slice};
 use rand::RngCore;
 use zarrs::{
-    array::{Array, ArrayBuilder, FillValue}, array_subset::ArraySubset, storage::{data_key, store::FilesystemStore, ReadableWritableListableStorage, StoreKey}
+    array::{Array, ArrayBuilder, FillValue},
+    array_subset::ArraySubset,
+    storage::{data_key, store::FilesystemStore, ReadableWritableListableStorage, StoreKey},
 };
-use zerocopy::{FromBytes, AsBytes};
+use zerocopy::{AsBytes, FromBytes};
 
 use nix::libc::O_DIRECT;
 
@@ -75,7 +77,7 @@ fn write_buffered_io(save_path: &Path, array_path: &str, input_data: &ArrayView3
         SHAPE.to_vec(),
         zarrs::array::DataType::UInt16,
         chunk_grid.try_into().unwrap(),
-        FillValue::from(0u16),
+        FillValue::from(7u16),
     )
     .dimension_names(["i", "Ky", "Kx"].into())
     .build(Arc::clone(&store), array_path)
@@ -92,6 +94,35 @@ fn write_buffered_io(save_path: &Path, array_path: &str, input_data: &ArrayView3
     }
 
     eprintln!("write_buffered_io took {:?}", t0.elapsed());
+}
+
+/// Write the array using the built-in `FilesystemStore` of `zarrs` with `direct_io` enabled.
+fn write_direct_zarrs(save_path: &Path, array_path: &str, input_data: &ArrayView3<u16>) {
+    let store: ReadableWritableListableStorage =
+        Arc::new(FilesystemStore::new_with_options(save_path, true).unwrap());
+    let chunk_grid = vec![CHUNK as u64, SIDE, SIDE];
+
+    let array = ArrayBuilder::new(
+        SHAPE.to_vec(),
+        zarrs::array::DataType::UInt16,
+        chunk_grid.try_into().unwrap(),
+        FillValue::from(7u16),
+    )
+    .dimension_names(["i", "Ky", "Kx"].into())
+    .build(Arc::clone(&store), array_path)
+    .unwrap();
+    array.store_metadata().unwrap();
+
+    let t0 = Instant::now();
+
+    for i in 0..(65536 / CHUNK as u64) {
+        let inp_slice = input_data.slice_axis(Axis(0), Slice::from(i as usize..i as usize + CHUNK));
+        array
+            .store_chunk_elements(&[i, 0, 0], inp_slice.as_slice().unwrap())
+            .unwrap();
+    }
+
+    eprintln!("write_direct_zarrs took {:?}", t0.elapsed());
 }
 
 fn key_to_fspath(save_path: &Path, key: &StoreKey) -> PathBuf {
@@ -111,7 +142,7 @@ fn write_direct_io(save_path: &Path, array_path: &str, input_data: &ArrayView3<u
         SHAPE.to_vec(),
         zarrs::array::DataType::UInt16,
         chunk_grid.try_into().unwrap(),
-        FillValue::from(0u16),
+        FillValue::from(7u16),
     )
     .dimension_names(["i", "Ky", "Kx"].into())
     .build(Arc::clone(&store), array_path)
@@ -172,6 +203,7 @@ enum RunWhat {
     Compare,
     Both,
     Buffered,
+    DirectZarrs,
     #[default]
     Direct,
 }
@@ -182,16 +214,21 @@ struct Args {
 
     #[arg(short, long)]
     what: RunWhat,
+
+    #[arg(short, long)]
+    random: bool,
 }
 
-fn make_data() -> Array3<u16> {
+fn make_data(random: bool) -> Array3<u16> {
     let mut data = vec![0u16; 65536 * (SIDE * SIDE) as usize];
     let data_bytes = data.as_bytes_mut();
 
-    eprintln!("filling data with randomness...");
-    let t0 = Instant::now();
-    rand::thread_rng().fill_bytes(data_bytes);
-    eprintln!("... done in {:?}.", t0.elapsed());
+    if random {
+        eprintln!("Generating random test data...");
+        let t0 = Instant::now();
+        rand::thread_rng().fill_bytes(data_bytes);
+        eprintln!("... done in {:?}.", t0.elapsed());
+    }
 
     Array3::from_shape_vec([65536, SIDE as usize, SIDE as usize], data).unwrap()
 }
@@ -200,25 +237,34 @@ fn main() {
     let args = Args::parse();
     match args.what {
         RunWhat::Both => {
-            let input_arr = make_data();
+            let input_arr = make_data(args.random);
             write_buffered_io(&args.save_prefix, "/buffered", &input_arr.view());
             write_direct_io(&args.save_prefix, "/direct", &input_arr.view());
         }
         RunWhat::Direct => {
-            let input_arr = make_data();
+            let input_arr = make_data(args.random);
             write_direct_io(&args.save_prefix, "/direct", &input_arr.view());
         }
+        RunWhat::DirectZarrs => {
+            let input_arr = make_data(args.random);
+            write_direct_zarrs(&args.save_prefix, "/direct_zarrs", &input_arr.view());
+        }
         RunWhat::Buffered => {
-            let input_arr = make_data();
+            let input_arr = make_data(args.random);
             write_buffered_io(&args.save_prefix, "/buffered", &input_arr.view());
         }
         RunWhat::Compare => {
-            let store: ReadableWritableListableStorage = Arc::new(FilesystemStore::new(&args.save_prefix).unwrap());
+            let store: ReadableWritableListableStorage =
+                Arc::new(FilesystemStore::new(&args.save_prefix).unwrap());
             let a_buf = Array::open(Arc::clone(&store), "/buffered").unwrap();
             let a_dir = Array::open(Arc::clone(&store), "/direct").unwrap();
 
             for i in 0..(65536 / CHUNK) {
-                let subset: ArraySubset = ArraySubset::new_with_ranges(&[i as u64..i as u64 + CHUNK as u64, 0..SIDE, 0..SIDE]);
+                let subset: ArraySubset = ArraySubset::new_with_ranges(&[
+                    i as u64..i as u64 + CHUNK as u64,
+                    0..SIDE,
+                    0..SIDE,
+                ]);
                 let buf_bytes = a_buf.retrieve_array_subset(&subset).unwrap();
                 let dir_bytes = a_dir.retrieve_array_subset(&subset).unwrap();
                 assert_eq!(buf_bytes, dir_bytes);

@@ -9,5 +9,7 @@ ndarray = "0.16.1"
 nix = "0.29.0"
 page_size = "0.6.0"
 rand = "0.8.5"
-zarrs = { version = "0.16.3" }
+# zarrs = { version = "0.16.3" }
+# zarrs = { path = "../zarrs/" }
+zarrs = { git = "https://github.com/sk1p/zarrs.git", branch = "dio" }
 zerocopy = "0.7.35"
