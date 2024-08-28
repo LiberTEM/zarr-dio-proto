@@ -4,12 +4,20 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+bytes = "1.7.1"
 clap = { version = "4.5.16", features = ["derive"] }
 ndarray = "0.16.1"
 nix = "0.29.0"
 page_size = "0.6.0"
+parking_lot = "0.12.3"
 rand = "0.8.5"
+thiserror = "1.0.63"
+tikv-jemallocator = "0.6.0"
+walkdir = "2.5.0"
 # zarrs = { version = "0.16.3" }
-# zarrs = { path = "../zarrs/" }
-zarrs = { git = "https://github.com/sk1p/zarrs.git", branch = "dio" }
+zarrs = { path = "../zarrs/" }
+# zarrs = { git = "https://github.com/sk1p/zarrs.git", branch = "dio" }
 zerocopy = "0.7.35"
+
+[profile.release]
+debug = true

@@ -11,13 +11,15 @@ use std::{
     time::Instant,
 };
 
+use bytes::BytesMut;
 use clap::Parser;
 use ndarray::{Array3, ArrayView3, Axis, Slice};
 use rand::RngCore;
+use tikv_jemallocator::Jemalloc;
 use zarrs::{
     array::{Array, ArrayBuilder, FillValue},
     array_subset::ArraySubset,
-    storage::{data_key, store::FilesystemStore, ReadableWritableListableStorage, StoreKey},
+    storage::{data_key, store::{FilesystemStore, FilesystemStoreOptions}, Bytes, ReadableWritableListableStorage, StoreKey},
 };
 use zerocopy::{AsBytes, FromBytes};
 
@@ -98,8 +100,10 @@ fn write_buffered_io(save_path: &Path, array_path: &str, input_data: &ArrayView3
 
 /// Write the array using the built-in `FilesystemStore` of `zarrs` with `direct_io` enabled.
 fn write_direct_zarrs(save_path: &Path, array_path: &str, input_data: &ArrayView3<u16>) {
+    let mut opts = FilesystemStoreOptions::default();
+    opts.direct_io(true);
     let store: ReadableWritableListableStorage =
-        Arc::new(FilesystemStore::new_with_options(save_path, true).unwrap());
+        Arc::new(FilesystemStore::new_with_options(save_path, opts).unwrap());
     let chunk_grid = vec![CHUNK as u64, SIDE, SIDE];
 
     let array = ArrayBuilder::new(
@@ -123,6 +127,60 @@ fn write_direct_zarrs(save_path: &Path, array_path: &str, input_data: &ArrayView
     }
 
     eprintln!("write_direct_zarrs took {:?}", t0.elapsed());
+}
+
+fn bytes_aligned(size: usize) -> BytesMut {
+    let align = page_size::get();
+    let mut bytes = BytesMut::with_capacity(size + align * 2);
+    let offset = bytes.as_ptr().align_offset(align);
+    bytes.split_off(offset)
+}
+
+/// Write the array using the built-in `FilesystemStore` of `zarrs` with `direct_io` enabled.
+fn write_direct_zarrs_manual_encode(save_path: &Path, array_path: &str, input_data: &ArrayView3<u16>) {
+    let mut opts = FilesystemStoreOptions::default();
+    opts.direct_io(true);
+    let store: ReadableWritableListableStorage =
+        Arc::new(FilesystemStore::new_with_options(save_path, opts).unwrap());
+    let chunk_grid = vec![CHUNK as u64, SIDE, SIDE];
+
+    let array = ArrayBuilder::new(
+        SHAPE.to_vec(),
+        zarrs::array::DataType::UInt16,
+        chunk_grid.try_into().unwrap(),
+        FillValue::from(7u16),
+    )
+    .dimension_names(["i", "Ky", "Kx"].into())
+    .build(Arc::clone(&store), array_path)
+    .unwrap();
+    array.store_metadata().unwrap();
+
+    let t0 = Instant::now();
+
+    let mut buf: BytesMut = bytes_aligned(CHUNK *(SIDE * SIDE * 2) as usize);
+
+    // let mut buf = PageAlinedBuffer::new((SIDE * SIDE * 2) as usize * CHUNK);
+
+    for i in 0..(65536 / CHUNK as u64) {
+        assert!(buf.as_ptr().align_offset(page_size::get()) == 0, "a");
+
+        let inp_slice = input_data.slice_axis(Axis(0), Slice::from(i as usize..i as usize + CHUNK));
+        buf.clear();
+        assert!(buf.as_ptr().align_offset(page_size::get()) == 0, "a.0");
+        buf.extend_from_slice(inp_slice.as_slice().unwrap().as_bytes());
+
+        assert!(buf.as_ptr().align_offset(page_size::get()) == 0, "b");
+
+        let buf_frozen = buf.freeze();
+        unsafe {
+            array
+            .store_encoded_chunk(&[i, 0, 0], buf_frozen.clone())
+                .unwrap();
+        }
+        buf = buf_frozen.try_into_mut().unwrap();  // FIXME: handle the case where the buffer is still in use
+    }
+
+    eprintln!("write_direct_zarrs_manual_encode took {:?}", t0.elapsed());
 }
 
 fn key_to_fspath(save_path: &Path, key: &StoreKey) -> PathBuf {
@@ -204,6 +262,7 @@ enum RunWhat {
     Both,
     Buffered,
     DirectZarrs,
+    DirectZarrsEncoded,
     #[default]
     Direct,
 }
@@ -233,6 +292,9 @@ fn make_data(random: bool) -> Array3<u16> {
     Array3::from_shape_vec([65536, SIDE as usize, SIDE as usize], data).unwrap()
 }
 
+//#[global_allocator]
+//static GLOBAL: Jemalloc = Jemalloc;
+
 fn main() {
     let args = Args::parse();
     match args.what {
@@ -248,6 +310,10 @@ fn main() {
         RunWhat::DirectZarrs => {
             let input_arr = make_data(args.random);
             write_direct_zarrs(&args.save_prefix, "/direct_zarrs", &input_arr.view());
+        }
+        RunWhat::DirectZarrsEncoded => {
+            let input_arr = make_data(args.random);
+            write_direct_zarrs_manual_encode(&args.save_prefix, "/direct_zarrs_encoded", &input_arr.view());
         }
         RunWhat::Buffered => {
             let input_arr = make_data(args.random);
