@@ -11,7 +11,7 @@ than benchmarking.
 
 ## Usage
 
-`cargo run --release -- /path/to/fast/storage/some-dataset/ --what=both`
+`cargo run --release -- /path/to/fast/storage/some-dataset/ --what=all`
 
 ## Example output
 
@@ -26,7 +26,13 @@ write_buffered_io took 37.868774784s
 write_direct_io took 7.341378322s
 ```
 
-It creates both a `/direct` and a `/buffered` array in the zarr dataset, which
-can be compared for equality using:
+It creates the following arrays in the zarr dataset:
+
+- `/direct` written "manually" using `O_DIRECT` 
+- `/buffered` written using normal buffered I/O
+- `/direct_zarrs` written with the direct I/O support from [zarrs/58](https://github.com/LDeakin/zarrs/pull/58)
+- `/direct_zarrs_encoded` written with the fast-path API from [zarrs/64](https://github.com/LDeakin/zarrs/pull/64)
+
+They be compared for equality using:
 
 `cargo run --release -- /path/to/fast/storage/some-dataset/ --what=compare`

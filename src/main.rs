@@ -217,7 +217,7 @@ fn write_direct_io(save_path: &Path, array_path: &str, input_data: &ArrayView3<u
 #[derive(Default, Clone, Debug, clap::ValueEnum)]
 enum RunWhat {
     Compare,
-    Both,
+    All,
     Buffered,
     DirectZarrs,
     DirectZarrsEncoded,
@@ -253,10 +253,12 @@ fn make_data(random: bool) -> Array3<u16> {
 fn main() {
     let args = Args::parse();
     match args.what {
-        RunWhat::Both => {
+        RunWhat::All => {
             let input_arr = make_data(args.random);
             write_buffered_io(&args.save_prefix, "/buffered", &input_arr.view());
             write_direct_io(&args.save_prefix, "/direct", &input_arr.view());
+            write_direct_zarrs_manual_encode(&args.save_prefix, "/direct_zarrs_encoded", &input_arr.view());
+            write_direct_zarrs(&args.save_prefix, "/direct_zarrs", &input_arr.view());
         }
         RunWhat::Direct => {
             let input_arr = make_data(args.random);
@@ -279,16 +281,23 @@ fn main() {
                 Arc::new(FilesystemStore::new(&args.save_prefix).unwrap());
             let a_buf = Array::open(Arc::clone(&store), "/buffered").unwrap();
             let a_dir = Array::open(Arc::clone(&store), "/direct").unwrap();
+            let a_dir_z = Array::open(Arc::clone(&store), "/direct_zarrs").unwrap();
+            let a_dir_ze = Array::open(Arc::clone(&store), "/direct_zarrs_encoded").unwrap();
 
-            for i in 0..(65536 / CHUNK) {
+            let read_chunk = 1;
+            for i in 0..(65536 / read_chunk) {
                 let subset: ArraySubset = ArraySubset::new_with_ranges(&[
-                    i as u64..i as u64 + CHUNK as u64,
+                    i as u64..i as u64 + read_chunk as u64,
                     0..SIDE,
                     0..SIDE,
                 ]);
                 let buf_bytes = a_buf.retrieve_array_subset(&subset).unwrap();
                 let dir_bytes = a_dir.retrieve_array_subset(&subset).unwrap();
+                let dir_z_bytes = a_dir_z.retrieve_array_subset(&subset).unwrap();
+                let dir_ze_bytes = a_dir_ze.retrieve_array_subset(&subset).unwrap();
                 assert_eq!(buf_bytes, dir_bytes);
+                assert_eq!(buf_bytes, dir_z_bytes);
+                assert_eq!(buf_bytes, dir_ze_bytes);
             }
         }
     }
