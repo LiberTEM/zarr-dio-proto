@@ -1,12 +1,9 @@
 use std::{
-    alloc::{GlobalAlloc, Layout, System},
     fs::OpenOptions,
     io::Write,
     mem::size_of,
-    ops::{Deref, DerefMut},
     os::unix::fs::OpenOptionsExt,
     path::{Path, PathBuf},
-    slice,
     sync::Arc,
     time::Instant,
 };
@@ -15,55 +12,18 @@ use bytes::BytesMut;
 use clap::Parser;
 use ndarray::{Array3, ArrayView3, Axis, Slice};
 use rand::RngCore;
-use tikv_jemallocator::Jemalloc;
 use zarrs::{
     array::{Array, ArrayBuilder, FillValue},
     array_subset::ArraySubset,
-    storage::{data_key, store::{FilesystemStore, FilesystemStoreOptions}, Bytes, ReadableWritableListableStorage, StoreKey},
+    storage::{data_key, store::{FilesystemStore, FilesystemStoreOptions}, ReadableWritableListableStorage, StoreKey},
 };
-use zerocopy::{AsBytes, FromBytes};
+use zerocopy::AsBytes;
 
 use nix::libc::O_DIRECT;
 
-/// For O_DIRECT, we need a buffer that is aligned to the page size and is a
-/// multiple of the page size.
-pub struct PageAlinedBuffer {
-    buf: *mut u8,
-    layout: Layout,
-}
-
-impl PageAlinedBuffer {
-    pub fn new(size: usize) -> Self {
-        let align = page_size::get();
-        let pad_size = (align - (size % align)) % align;
-        let padded_size = size + pad_size;
-        let layout = Layout::from_size_align(padded_size, align).unwrap();
-        assert!(layout.size() > 0);
-        let buf = unsafe { System.alloc_zeroed(layout) };
-
-        Self { buf, layout }
-    }
-}
-
-impl Deref for PageAlinedBuffer {
-    type Target = [u8];
-
-    fn deref(&self) -> &Self::Target {
-        unsafe { slice::from_raw_parts(self.buf, self.layout.size()) }
-    }
-}
-
-impl DerefMut for PageAlinedBuffer {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        unsafe { slice::from_raw_parts_mut(self.buf, self.layout.size()) }
-    }
-}
-
-impl Drop for PageAlinedBuffer {
-    fn drop(&mut self) {
-        unsafe { System.dealloc(self.buf, self.layout) }
-    }
-}
+//use tikv_jemallocator::Jemalloc;
+//#[global_allocator]
+//static GLOBAL: Jemalloc = Jemalloc;
 
 /// The chunk size in the first dimension of our array
 const CHUNK: usize = 16;
@@ -129,6 +89,8 @@ fn write_direct_zarrs(save_path: &Path, array_path: &str, input_data: &ArrayView
     eprintln!("write_direct_zarrs took {:?}", t0.elapsed());
 }
 
+/// For O_DIRECT, we need a buffer that is aligned to the page size and is a
+/// multiple of the page size.
 fn bytes_aligned(size: usize) -> BytesMut {
     let align = page_size::get();
     let mut bytes = BytesMut::with_capacity(size + align * 2);
@@ -158,8 +120,6 @@ fn write_direct_zarrs_manual_encode(save_path: &Path, array_path: &str, input_da
     let t0 = Instant::now();
 
     let mut buf: BytesMut = bytes_aligned(CHUNK *(SIDE * SIDE * 2) as usize);
-
-    // let mut buf = PageAlinedBuffer::new((SIDE * SIDE * 2) as usize * CHUNK);
 
     for i in 0..(65536 / CHUNK as u64) {
         assert!(buf.as_ptr().align_offset(page_size::get()) == 0, "a");
@@ -209,7 +169,7 @@ fn write_direct_io(save_path: &Path, array_path: &str, input_data: &ArrayView3<u
 
     let t0 = Instant::now();
 
-    let mut buf = PageAlinedBuffer::new((SIDE * SIDE * 2) as usize * CHUNK);
+    let mut buf = bytes_aligned((SIDE * SIDE * 2) as usize * CHUNK);
 
     for i in 0..(65536 / CHUNK as u64) {
         let inp_slice = input_data.slice_axis(Axis(0), Slice::from(i as usize..i as usize + CHUNK));
@@ -236,18 +196,16 @@ fn write_direct_io(save_path: &Path, array_path: &str, input_data: &ArrayView3<u
 
         // Only write as much as we have to
         let cutoff = SIDE * SIDE * CHUNK as u64 * size_of::<u16>() as u64;
-        let align = page_size::get() as u64;
-        let pad_size = (align - (cutoff % align)) % align;
-        let aligned_cutoff = (cutoff + pad_size) as usize;
-        assert!(aligned_cutoff >= cutoff as usize);
-        assert!(aligned_cutoff % align as usize == 0);
 
         // Copy into aligned buffer:
-        let buf_u16 = u16::mut_slice_from(&mut buf).unwrap();
-        buf_u16[0..inp_slice.len()].copy_from_slice(data);
+        buf.clear();
+        let data_bytes = data.as_bytes();
+        let pad_size = data_bytes.len().next_multiple_of(page_size::get()) - data_bytes.len();
+        buf.extend_from_slice(data_bytes);
+        buf.extend(std::iter::repeat(0).take(pad_size));
 
         // Write
-        file.write_all(&buf[0..aligned_cutoff]).unwrap();
+        file.write_all(&buf).unwrap();
 
         // We may have written more because of page-size alignment; truncate.
         file.set_len(cutoff).unwrap();
@@ -291,9 +249,6 @@ fn make_data(random: bool) -> Array3<u16> {
 
     Array3::from_shape_vec([65536, SIDE as usize, SIDE as usize], data).unwrap()
 }
-
-//#[global_allocator]
-//static GLOBAL: Jemalloc = Jemalloc;
 
 fn main() {
     let args = Args::parse();
